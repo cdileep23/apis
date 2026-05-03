@@ -7,7 +7,7 @@ from django.shortcuts import get_object_or_404
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import generics
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated,IsAdminUser,AllowAny
 from rest_framework.views import APIView
 
 """
@@ -28,11 +28,30 @@ def product_list(request):
 
 'Class based view for product list'
 
-class ProductListView(generics.ListAPIView):
-    queryset = Product.objects.filter(stock__gt=0)
+class ProductListView(generics.ListCreateAPIView):
+    queryset = Product.objects.all()
     serializer_class = ProductSerializer
 
+    def get_permissions(self):
+        self.permission_classes=[AllowAny]
 
+        if self.request.method == 'POST':
+            self.permission_classes=[IsAdminUser]
+        return super().get_permissions()
+
+"""
+class based view for product create
+
+class ProductCreateView(generics.CreateAPIView):
+    model = Product
+    serializer_class = ProductSerializer
+
+     def create(self, request, *args, **kwargs):
+        print("Creating a new product with data:", request.data)
+        return super().create(request, *args, **kwargs) 
+
+"""
+   
 
 
 """
@@ -45,9 +64,16 @@ def product_detail(request, pk):
     return Response(serializer.data)
 """
 
-class ProductDetailView(generics.RetrieveAPIView):
+class ProductDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = Product.objects.all()
     serializer_class = ProductSerializer
+
+    def get_permissions(self):
+        self.permission_classes=[AllowAny]
+
+        if self.request.method in ['PUT','PATCH', 'DELETE']:
+            self.permission_classes=[IsAdminUser]
+        return super().get_permissions()
 
 """
 function based view for order list
