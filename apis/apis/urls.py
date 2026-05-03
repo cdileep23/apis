@@ -20,4 +20,5 @@ from django.urls import include, path
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('products/', include('store.urls')),
+    path('silk/', include('silk.urls', namespace='silk'))
 ]
