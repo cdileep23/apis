@@ -1,6 +1,8 @@
 # Day 3
 
-Switched the API from function-based views to DRF's class-based generic views, learned how DRF resolves a single object behind the scenes, dropped in `django-silk` to actually *see* the SQL my views run, and used `prefetch_related` to fix the N+1 query problem. Also picked up the difference between filtering on a real DB column vs a Python `@property`.
+**Session 1** — switched the API from function-based views to DRF's class-based generic views, learned how DRF resolves a single object behind the scenes, dropped in `django-silk` to actually *see* the SQL my views run, and used `prefetch_related` to fix the N+1 query problem. Also picked up the difference between filtering on a real DB column vs a Python `@property`.
+
+**Session 2** — added write endpoints. Started with a standalone `CreateAPIView`, then collapsed list+create into a single `ListCreateAPIView` and detail+update+delete into `RetrieveUpdateDestroyAPIView`. Learned how `CreateAPIView` wires `POST → create()` internally via `CreateModelMixin`, and used `get_permissions()` to apply different permissions per HTTP verb (anyone can read, only admins can write).
 
 ---
 
@@ -355,6 +357,215 @@ admin.site.register(Order, OrderAdmin)
 
 ---
 
+# Session 2 — write endpoints, combined generics, per-method permissions
+
+## Concept 9 — `CreateAPIView` and what `POST` really does
+
+A standalone create endpoint:
+
+```python
+class ProductCreateView(generics.CreateAPIView):
+    serializer_class = ProductSerializer
+```
+
+That's it. No `queryset` needed (you're not reading anything), only a serializer. So what's actually happening when a POST hits this view?
+
+### The class hierarchy
+
+```
+CreateAPIView
+  └── CreateModelMixin + GenericAPIView
+            └── APIView
+                  └── django.views.View
+```
+
+`CreateAPIView` itself is tiny — it just binds **POST → `self.create()`**:
+
+```python
+class CreateAPIView(mixins.CreateModelMixin, GenericAPIView):
+    def post(self, request, *args, **kwargs):
+        return self.create(request, *args, **kwargs)
+```
+
+Any verb other than POST returns `405 Method Not Allowed`.
+
+### Request lifecycle for `POST /products/create/`
+
+1. URL resolver → `ProductCreateView.as_view()(request)`.
+2. `APIView.dispatch()`:
+   - wraps the Django `HttpRequest` in a DRF `Request` (gives `.data`, content negotiation, auth)
+   - runs `perform_authentication` → `check_permissions` → `check_throttles`
+   - dispatches the verb → `self.post`
+3. `post()` calls `self.create(request, ...)` from `CreateModelMixin`:
+
+   ```python
+   def create(self, request, *args, **kwargs):
+       serializer = self.get_serializer(data=request.data)
+       serializer.is_valid(raise_exception=True)
+       self.perform_create(serializer)
+       headers = self.get_success_headers(serializer.data)
+       return Response(serializer.data, status=201, headers=headers)
+   ```
+4. `get_serializer()` reads `self.serializer_class` and instantiates it with `data=request.data`.
+5. `is_valid(raise_exception=True)` — failures bubble up as `ValidationError`, DRF's exception handler turns them into a `400`.
+6. `perform_create(serializer)` calls `serializer.save()` → `ProductSerializer.create(validated_data)` → `Product.objects.create(**validated_data)`.
+7. Response is rendered as JSON, returned with `201 Created`.
+
+### The `model = ...` gotcha
+
+```python
+class ProductCreateView(generics.CreateAPIView):
+    model = Product             # ← ignored by DRF
+    serializer_class = ProductSerializer
+```
+
+DRF's generics use `queryset` / `get_queryset()`, **not** `model`. The `model` attribute is a holdover from older Django CBVs and does nothing here. The model is reached via the serializer's `Meta.model`.
+
+### Hooks worth knowing
+
+| Hook | When to override |
+|---|---|
+| `get_serializer_class()` | Different serializer for read vs write (e.g. write-only fields) |
+| `perform_create(serializer)` | Inject request-scoped data — `serializer.save(user=self.request.user)` |
+| `get_serializer_context()` | Pass extra info into the serializer |
+| `create(request, ...)` | Last-resort: full control of the flow (logging, custom response shape) |
+
+### Principle
+
+> The "magic" of a generic view is just two layers: a verb-handler method (`post`) on the generic class, and a mixin method (`create`) that does the work. To customize, override the smallest hook — `perform_create` for what to save, `get_serializer_class` for how to validate, `create` only when neither is enough.
+
+---
+
+## Concept 10 — Combining generics: `ListCreateAPIView`, `RetrieveUpdateDestroyAPIView`
+
+`ProductListView` was a `ListAPIView` (read-only). Adding a separate `ProductCreateView` for POST means two URL routes for the same resource. DRF ships combined generics that fold both verbs into one view at one URL:
+
+```python
+class ProductListView(generics.ListCreateAPIView):
+    queryset = Product.objects.all()
+    serializer_class = ProductSerializer
+    # GET  /products/  → list
+    # POST /products/  → create
+```
+
+```python
+class ProductDetailView(generics.RetrieveUpdateDestroyAPIView):
+    queryset = Product.objects.all()
+    serializer_class = ProductSerializer
+    # GET    /products/<pk>/ → retrieve
+    # PUT    /products/<pk>/ → update      (full replace)
+    # PATCH  /products/<pk>/ → partial_update
+    # DELETE /products/<pk>/ → destroy
+```
+
+### How they're built
+
+Each combined view is just a stack of mixins:
+
+```python
+class ListCreateAPIView(ListModelMixin, CreateModelMixin, GenericAPIView):
+    def get(self, request, *a, **kw):  return self.list(request, *a, **kw)
+    def post(self, request, *a, **kw): return self.create(request, *a, **kw)
+
+class RetrieveUpdateDestroyAPIView(RetrieveModelMixin, UpdateModelMixin,
+                                   DestroyModelMixin, GenericAPIView):
+    def get(...):    return self.retrieve(...)
+    def put(...):    return self.update(...)
+    def patch(...):  return self.partial_update(...)
+    def delete(...): return self.destroy(...)
+```
+
+So the "combined" generic is purely a matter of which mixins are bolted onto `GenericAPIView` and which verbs are wired up.
+
+### The full ladder
+
+| Generic | Verbs | Mixins |
+|---|---|---|
+| `ListAPIView` | GET (list) | List |
+| `CreateAPIView` | POST | Create |
+| `RetrieveAPIView` | GET (one) | Retrieve |
+| `UpdateAPIView` | PUT, PATCH | Update |
+| `DestroyAPIView` | DELETE | Destroy |
+| `ListCreateAPIView` | GET, POST | List + Create |
+| `RetrieveUpdateAPIView` | GET, PUT, PATCH | Retrieve + Update |
+| `RetrieveDestroyAPIView` | GET, DELETE | Retrieve + Destroy |
+| `RetrieveUpdateDestroyAPIView` | GET, PUT, PATCH, DELETE | Retrieve + Update + Destroy |
+
+### Principle
+
+> Pick the combined generic that matches the URL's verbs, not one generic per verb. `/products/` serves list+create at one path; `/products/<pk>/` serves retrieve+update+delete at another. Two routes, two views, full CRUD.
+
+---
+
+## Concept 11 — `get_permissions()` for per-method permissions
+
+`permission_classes = [...]` applies the **same** permissions to every verb the view handles. But on a `ListCreateAPIView`, I want anyone (even anonymous) to read, and only admins to write. That's per-verb logic, so I override `get_permissions`:
+
+```python
+class ProductListView(generics.ListCreateAPIView):
+    queryset = Product.objects.all()
+    serializer_class = ProductSerializer
+
+    def get_permissions(self):
+        self.permission_classes = [AllowAny]
+        if self.request.method == 'POST':
+            self.permission_classes = [IsAdminUser]
+        return super().get_permissions()
+```
+
+```python
+class ProductDetailView(generics.RetrieveUpdateDestroyAPIView):
+    queryset = Product.objects.all()
+    serializer_class = ProductSerializer
+
+    def get_permissions(self):
+        self.permission_classes = [AllowAny]
+        if self.request.method in ['PUT', 'PATCH', 'DELETE']:
+            self.permission_classes = [IsAdminUser]
+        return super().get_permissions()
+```
+
+### How DRF actually uses it
+
+Inside `APIView.dispatch()` → `initial(request)` → `check_permissions(request)`, DRF calls `self.get_permissions()` to get the **list of permission instances** to enforce on this request:
+
+```python
+# default in APIView
+def get_permissions(self):
+    return [permission() for permission in self.permission_classes]
+```
+
+It just instantiates the class-level list. Overriding the method gives you a chance to **mutate `self.permission_classes` based on `self.request`** before the parent instantiates them.
+
+### Step-by-step on a request
+
+1. Request arrives → `dispatch()` runs.
+2. `check_permissions(request)` is called.
+3. It calls `self.get_permissions()` — my version.
+4. Default is set: `self.permission_classes = [AllowAny]`.
+5. If the verb is a write verb, override to `[IsAdminUser]`.
+6. `super().get_permissions()` returns instantiated `[AllowAny()]` or `[IsAdminUser()]`.
+7. DRF iterates them, calling `.has_permission(request, view)`. Any `False` → `403` (or `401` if unauthenticated).
+
+### Why mutating `self.permission_classes` is safe here
+
+Class attributes are usually shared across instances, but `as_view()` instantiates the view **fresh per request**, so writing to `self.permission_classes` doesn't leak across requests. Still, the cleaner version skips the mutation and just returns instances directly:
+
+```python
+def get_permissions(self):
+    if self.request.method in ['PUT', 'PATCH', 'DELETE']:
+        return [IsAdminUser()]
+    return [AllowAny()]
+```
+
+Same behavior, no `super()` call, no instance state being rewritten.
+
+### Principle
+
+> `permission_classes` is the static default; `get_permissions()` is the per-request override. Use the method whenever the same view handles multiple verbs with different access rules — read open, write restricted is the canonical case.
+
+---
+
 ## Quick reference: errors I fixed today
 
 | Error | Cause | Fix |
@@ -375,3 +586,7 @@ admin.site.register(Order, OrderAdmin)
 7. **You can't filter on a `@property`.** SQL doesn't run Python — filter on the underlying column or use `annotate()` to lift the derivation into SQL.
 8. **Silk shows the actual SQL** every request runs. Always wire it up early — N+1 is invisible until you can see it.
 9. **`TabularInline` reads the FK** to embed child editing in the parent's admin page. Zero extra config.
+10. **`CreateAPIView` is just `POST → create()` from `CreateModelMixin`.** The real work — validate, save, return 201 — is in the mixin's `create()`. Override `perform_create` to inject request data, `get_serializer_class` for read/write splits, `create` only for full custom flow.
+11. **`model = ...` is ignored by DRF generics.** They use `queryset` / `get_queryset()`. The model is reached via the serializer's `Meta.model`.
+12. **Combine CRUD on a single URL with the combined generics.** `ListCreateAPIView` for the collection route, `RetrieveUpdateDestroyAPIView` for the detail route. Two views = full CRUD.
+13. **Per-verb permissions go in `get_permissions()`.** `permission_classes` is the static default; the method overrides per-request. Canonical pattern: `AllowAny` for read verbs, `IsAdminUser` for write verbs.
