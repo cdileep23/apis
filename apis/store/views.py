@@ -9,7 +9,10 @@ from rest_framework.response import Response
 from rest_framework import generics
 from rest_framework.permissions import IsAuthenticated,IsAdminUser,AllowAny
 from rest_framework.views import APIView
-
+from apis.filters import ProductFilter,InStockFilterBackend
+from rest_framework import filters
+from rest_framework.pagination import PageNumberPagination
+from django_filters.rest_framework import DjangoFilterBackend
 """
 
 function based view for product list
@@ -29,8 +32,14 @@ def product_list(request):
 'Class based view for product list'
 
 class ProductListView(generics.ListCreateAPIView):
-    queryset = Product.objects.all()
+    queryset = Product.objects.order_by('name')
     serializer_class = ProductSerializer
+    filterset_class = ProductFilter
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter,filters.OrderingFilter,InStockFilterBackend]
+    search_fields = ['=name','description']
+    ordering_fields = ['price', 'name']
+    pagination_class = PageNumberPagination
+    pagination_class.page_size = 5
 
     def get_permissions(self):
         self.permission_classes=[AllowAny]
