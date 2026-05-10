@@ -1,8 +1,8 @@
 
 # Create your views here.
 from django.db.models import Max
-from .models import Product,Order
-from .serializers import ProductInfoSerializer, ProductSerializer,OrderSerializer
+from .models import Product,Order,User
+from .serializers import ProductInfoSerializer, ProductSerializer,OrderSerializer,OrderCreateSerializer,UserSerializer
 from django.shortcuts import get_object_or_404
 from rest_framework.decorators import action, api_view
 from rest_framework.response import Response
@@ -128,7 +128,11 @@ class OrderViewSet(viewsets.ModelViewSet):
       filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
       ordering_fields = ['created_at']
       
+      def get_serializer_class(self):
+         return super().get_serializer_class() if self.action in ['list', 'retrieve'] else OrderCreateSerializer
+
       def get_queryset(self):
+          
           queryset=super().get_queryset()
           if self.request.user.is_staff:
               return queryset.filter(user=self.request.user)
@@ -162,3 +166,8 @@ class ProductInfoView(APIView):
         max_price=products.aggregate(max_price=Max('price'))['max_price']
         serializer=ProductInfoSerializer({'products':products,'count':count,'max_price':max_price})
         return Response(serializer.data)
+    
+class UserListView(generics.ListAPIView):
+    queryset=User.objects.all()
+    serializer_class=UserSerializer
+    pagination_class=None
