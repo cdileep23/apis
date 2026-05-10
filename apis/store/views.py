@@ -4,15 +4,16 @@ from django.db.models import Max
 from .models import Product,Order
 from .serializers import ProductInfoSerializer, ProductSerializer,OrderSerializer
 from django.shortcuts import get_object_or_404
-from rest_framework.decorators import api_view
+from rest_framework.decorators import action, api_view
 from rest_framework.response import Response
 from rest_framework import generics
 from rest_framework.permissions import IsAuthenticated,IsAdminUser,AllowAny
 from rest_framework.views import APIView
-from apis.filters import ProductFilter,InStockFilterBackend
+from apis.filters import ProductFilter,InStockFilterBackend,OrderFilter
 from rest_framework import filters
 from rest_framework.pagination import PageNumberPagination
 from django_filters.rest_framework import DjangoFilterBackend
+from rest_framework import viewsets
 """
 
 function based view for product list
@@ -100,6 +101,7 @@ def order_list(request):
 class based view for order list
 """
 
+"""
 class OrderListView(generics.ListAPIView):
     queryset=Order.objects.prefetch_related('items__product')
     serializer_class=OrderSerializer
@@ -112,6 +114,32 @@ class UserOrderListView(generics.ListAPIView):
     def get_queryset(self):
         user=self.request.user
         return self.queryset.filter(user=user)
+
+"""
+
+
+
+class OrderViewSet(viewsets.ModelViewSet):
+      queryset=Order.objects.prefetch_related('items__product')
+      serializer_class=OrderSerializer
+      permission_classes=[AllowAny]
+      pagination_class=None
+      filterset_class=OrderFilter
+      filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
+      ordering_fields = ['created_at']
+      
+      def get_queryset(self):
+          queryset=super().get_queryset()
+          if self.request.user.is_staff:
+              return queryset.filter(user=self.request.user)
+          return queryset
+
+      @action(detail=False, methods=['get'],url_path='user-orders', permission_classes=[IsAuthenticated])
+      def user_order(self,request):
+          user=self.request.user
+          orders=self.queryset.filter(user=user)
+          serializer=self.get_serializer(orders, many=True)
+          return Response(serializer.data)
 
 
 """
